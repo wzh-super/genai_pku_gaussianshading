@@ -1,3 +1,7 @@
+本仓库是基于原论文代码 [https://github.com/bsmhmmlf/Gaussian-Shading.git] 的个人复现/修改版本。
+This repository is an unofficial implementation / personal modification based on [(https://github.com/bsmhmmlf/Gaussian-Shading.git)].
+原论文：Gaussian Shading: Provable Performance-Lossless Image Watermarking for Diffusion Models
+
 # Gaussian Shading: Provable Performance-Lossless Image Watermarking for Diffusion Models
 
 [![arXiv](https://img.shields.io/badge/arXiv-2404.04956-b31b1b.svg)](https://arxiv.org/abs/2404.04956)
