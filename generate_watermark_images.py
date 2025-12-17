@@ -1,10 +1,10 @@
 """
-生成带水印的图像（支持无水印、Gaussian Shading、TreeRing三种方式）
+生成带水印的图像
 用法: python generate_watermark_images.py --num 10 --output_dir ./output_images
 
-噪声关系：
-- 无水印 & TreeRing：同一个seed → 同一个噪声，TreeRing在傅里叶域做变换
-- Gaussian Shading：同一个seed → 但根据watermark构造新噪声，所以噪声不同
+噪声关系（三者从同一个GS噪声出发，因为GS噪声服从标准正态分布）：
+- Gaussian Shading：GS构造的噪声（服从标准正态分布，本身带GS水印）
+- GS + TreeRing：在GS噪声上再加TreeRing傅里叶域水印
 """
 import argparse
 import os
@@ -139,48 +139,11 @@ def main(args):
         # 从数据集获取prompt
         current_prompt = dataset[i][prompt_key]
 
-        # ========== 1. 从同一个seed采样原始噪声 ==========
+        # ========== 1. 生成Gaussian Shading噪声（服从标准正态分布） ==========
         set_random_seed(seed)
-        init_latents_original = pipe.get_random_latents()
-
-        # ========== 2. 无水印生成（直接使用原始噪声） ==========
-        outputs_no_wm = pipe(
-            current_prompt,
-            num_images_per_prompt=1,
-            guidance_scale=args.guidance_scale,
-            num_inference_steps=args.num_inference_steps,
-            height=args.image_length,
-            width=args.image_length,
-            latents=init_latents_original.clone(),
-        )
-        image_no_wm = outputs_no_wm.images[0]
-
-        # ========== 3. TreeRing 水印生成（对原始噪声做傅里叶变换） ==========
-        # 复制原始噪声
-        init_latents_tr = init_latents_original.clone()
-
-        # 获取水印mask（使用官方函数）
-        watermarking_mask = get_watermarking_mask(init_latents_tr, args, device)
-
-        # 注入水印（使用float32版本避免cuFFT错误）
-        init_latents_tr = inject_watermark_float32(init_latents_tr, watermarking_mask, tr_gt_patch, args)
-        init_latents_tr = init_latents_tr.to(torch.float16)
-
-        outputs_tr = pipe(
-            current_prompt,
-            num_images_per_prompt=1,
-            guidance_scale=args.guidance_scale,
-            num_inference_steps=args.num_inference_steps,
-            height=args.image_length,
-            width=args.image_length,
-            latents=init_latents_tr,
-        )
-        image_tr = outputs_tr.images[0]
-
-        # ========== 4. Gaussian Shading 水印生成（根据watermark构造新噪声） ==========
-        set_random_seed(seed)  # 重置种子
         init_latents_gs = gs_watermark.create_watermark_and_return_w()
 
+        # ========== 2. Gaussian Shading 生成（直接用GS噪声） ==========
         outputs_gs = pipe(
             current_prompt,
             num_images_per_prompt=1,
@@ -188,23 +151,42 @@ def main(args):
             num_inference_steps=args.num_inference_steps,
             height=args.image_length,
             width=args.image_length,
-            latents=init_latents_gs,
+            latents=init_latents_gs.clone(),
         )
         image_gs = outputs_gs.images[0]
 
+        # ========== 3. GS + TreeRing 生成（在GS噪声上加TreeRing傅里叶变换） ==========
+        init_latents_gs_tr = init_latents_gs.clone()
+
+        # 获取水印mask
+        watermarking_mask = get_watermarking_mask(init_latents_gs_tr, args, device)
+
+        # 注入TreeRing水印
+        init_latents_gs_tr = inject_watermark_float32(init_latents_gs_tr, watermarking_mask, tr_gt_patch, args)
+        init_latents_gs_tr = init_latents_gs_tr.to(torch.float16)
+
+        outputs_gs_tr = pipe(
+            current_prompt,
+            num_images_per_prompt=1,
+            guidance_scale=args.guidance_scale,
+            num_inference_steps=args.num_inference_steps,
+            height=args.image_length,
+            width=args.image_length,
+            latents=init_latents_gs_tr,
+        )
+        image_gs_tr = outputs_gs_tr.images[0]
+
         # ========== 保存图像 ==========
-        image_no_wm.save(os.path.join(args.output_dir, f'{i:04d}_no_watermark.png'))
-        image_tr.save(os.path.join(args.output_dir, f'{i:04d}_tree_ring.png'))
         image_gs.save(os.path.join(args.output_dir, f'{i:04d}_gaussian_shading.png'))
+        image_gs_tr.save(os.path.join(args.output_dir, f'{i:04d}_gs_treering.png'))
 
         # 记录prompt
         prompts_record.append({
             'index': i,
             'seed': seed,
             'prompt': current_prompt,
-            'no_watermark_image': f'{i:04d}_no_watermark.png',
-            'tree_ring_image': f'{i:04d}_tree_ring.png',
             'gaussian_shading_image': f'{i:04d}_gaussian_shading.png',
+            'gs_treering_image': f'{i:04d}_gs_treering.png',
         })
 
         print(f'[{i+1}/{args.num}] Prompt: {current_prompt[:50]}...')
@@ -212,9 +194,8 @@ def main(args):
         # 保存初始噪声用于对比（可选）
         if args.save_latents:
             torch.save({
-                'original': init_latents_original.cpu(),
-                'tree_ring': init_latents_tr.cpu(),
                 'gaussian_shading': init_latents_gs.cpu(),
+                'gs_treering': init_latents_gs_tr.cpu(),
                 'seed': seed,
                 'prompt': current_prompt,
             }, os.path.join(args.output_dir, f'{i:04d}_latents.pt'))
