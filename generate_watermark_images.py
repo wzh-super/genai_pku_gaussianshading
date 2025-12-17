@@ -18,12 +18,60 @@ from image_utils import set_random_seed
 
 # 导入TreeRing官方代码（避免与当前目录的optim_utils冲突）
 import importlib.util
+import copy
+import numpy as np
 spec = importlib.util.spec_from_file_location("tr_optim_utils", "./tree-ring-watermark/optim_utils.py")
 tr_optim_utils = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tr_optim_utils)
 get_watermarking_mask = tr_optim_utils.get_watermarking_mask
-get_watermarking_pattern = tr_optim_utils.get_watermarking_pattern
-inject_watermark = tr_optim_utils.inject_watermark
+circle_mask = tr_optim_utils.circle_mask
+
+
+def get_watermarking_pattern_float32(pipe, args, device):
+    """生成TreeRing水印pattern（使用float32避免cuFFT错误）"""
+    set_random_seed(args.w_seed)
+
+    # 生成float32的随机噪声
+    gt_init = torch.randn(1, 4, 64, 64, device=device, dtype=torch.float32)
+
+    if 'ring' in args.w_pattern:
+        gt_patch = torch.fft.fftshift(torch.fft.fft2(gt_init), dim=(-1, -2))
+        gt_patch_tmp = copy.deepcopy(gt_patch)
+        for i in range(args.w_radius, 0, -1):
+            tmp_mask = circle_mask(gt_init.shape[-1], r=i)
+            tmp_mask = torch.tensor(tmp_mask).to(device)
+            for j in range(gt_patch.shape[1]):
+                gt_patch[:, j, tmp_mask] = gt_patch_tmp[0, j, 0, i].item()
+    elif 'rand' in args.w_pattern:
+        gt_patch = torch.fft.fftshift(torch.fft.fft2(gt_init), dim=(-1, -2))
+        gt_patch[:] = gt_patch[0]
+    elif 'zeros' in args.w_pattern:
+        gt_patch = torch.fft.fftshift(torch.fft.fft2(gt_init), dim=(-1, -2)) * 0
+    elif 'const' in args.w_pattern:
+        gt_patch = torch.fft.fftshift(torch.fft.fft2(gt_init), dim=(-1, -2)) * 0
+        gt_patch += args.w_pattern_const
+    else:
+        gt_patch = torch.fft.fftshift(torch.fft.fft2(gt_init), dim=(-1, -2))
+
+    return gt_patch
+
+
+def inject_watermark_float32(init_latents_w, watermarking_mask, gt_patch, args):
+    """注入TreeRing水印（使用float32避免cuFFT错误）"""
+    # 转成float32做FFT
+    init_latents_w_f32 = init_latents_w.to(torch.float32)
+
+    init_latents_w_fft = torch.fft.fftshift(torch.fft.fft2(init_latents_w_f32), dim=(-1, -2))
+
+    if args.w_injection == 'complex':
+        init_latents_w_fft[watermarking_mask] = gt_patch[watermarking_mask].clone()
+    elif args.w_injection == 'seed':
+        init_latents_w_f32[watermarking_mask] = gt_patch[watermarking_mask].clone().real
+        return init_latents_w_f32
+
+    init_latents_w_f32 = torch.fft.ifft2(torch.fft.ifftshift(init_latents_w_fft, dim=(-1, -2))).real
+
+    return init_latents_w_f32
 
 
 # ==================== 数据集加载 ====================
@@ -73,8 +121,8 @@ def main(args):
     else:
         gs_watermark = Gaussian_Shading(args.channel_copy, args.hw_copy, args.fpr, args.user_number)
 
-    # 初始化TreeRing水印pattern（使用官方函数）
-    tr_gt_patch = get_watermarking_pattern(pipe, args, device)
+    # 初始化TreeRing水印pattern（使用float32版本避免cuFFT错误）
+    tr_gt_patch = get_watermarking_pattern_float32(pipe, args, device)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -110,8 +158,8 @@ def main(args):
         # 获取水印mask（使用官方函数）
         watermarking_mask = get_watermarking_mask(init_latents_tr, args, device)
 
-        # 注入水印（使用官方函数）
-        init_latents_tr = inject_watermark(init_latents_tr, watermarking_mask, tr_gt_patch, args)
+        # 注入水印（使用float32版本避免cuFFT错误）
+        init_latents_tr = inject_watermark_float32(init_latents_tr, watermarking_mask, tr_gt_patch, args)
         init_latents_tr = init_latents_tr.to(torch.float16)
 
         outputs_tr = pipe(
