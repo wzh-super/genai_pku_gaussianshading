@@ -28,18 +28,18 @@ circle_mask = tr_optim_utils.circle_mask
 
 
 def get_watermarking_pattern_float32(pipe, args, device):
-    """生成TreeRing水印pattern（使用float32避免cuFFT错误）"""
+    """生成TreeRing水印pattern（在CPU上做FFT避免cuFFT错误）"""
     set_random_seed(args.w_seed)
 
-    # 生成float32的随机噪声
-    gt_init = torch.randn(1, 4, 64, 64, device=device, dtype=torch.float32)
+    # 在CPU上生成float32的随机噪声并做FFT
+    gt_init = torch.randn(1, 4, 64, 64, dtype=torch.float32)  # CPU
 
     if 'ring' in args.w_pattern:
         gt_patch = torch.fft.fftshift(torch.fft.fft2(gt_init), dim=(-1, -2))
         gt_patch_tmp = copy.deepcopy(gt_patch)
         for i in range(args.w_radius, 0, -1):
             tmp_mask = circle_mask(gt_init.shape[-1], r=i)
-            tmp_mask = torch.tensor(tmp_mask).to(device)
+            tmp_mask = torch.tensor(tmp_mask)
             for j in range(gt_patch.shape[1]):
                 gt_patch[:, j, tmp_mask] = gt_patch_tmp[0, j, 0, i].item()
     elif 'rand' in args.w_pattern:
@@ -53,25 +53,29 @@ def get_watermarking_pattern_float32(pipe, args, device):
     else:
         gt_patch = torch.fft.fftshift(torch.fft.fft2(gt_init), dim=(-1, -2))
 
-    return gt_patch
+    # 移到GPU
+    return gt_patch.to(device)
 
 
 def inject_watermark_float32(init_latents_w, watermarking_mask, gt_patch, args):
-    """注入TreeRing水印（使用float32避免cuFFT错误）"""
-    # 转成float32做FFT
-    init_latents_w_f32 = init_latents_w.to(torch.float32)
+    """注入TreeRing水印（在CPU上做FFT避免cuFFT错误）"""
+    # 移到CPU做FFT
+    init_latents_w_cpu = init_latents_w.to('cpu').to(torch.float32)
+    watermarking_mask_cpu = watermarking_mask.to('cpu')
+    gt_patch_cpu = gt_patch.to('cpu')
 
-    init_latents_w_fft = torch.fft.fftshift(torch.fft.fft2(init_latents_w_f32), dim=(-1, -2))
+    init_latents_w_fft = torch.fft.fftshift(torch.fft.fft2(init_latents_w_cpu), dim=(-1, -2))
 
     if args.w_injection == 'complex':
-        init_latents_w_fft[watermarking_mask] = gt_patch[watermarking_mask].clone()
+        init_latents_w_fft[watermarking_mask_cpu] = gt_patch_cpu[watermarking_mask_cpu].clone()
     elif args.w_injection == 'seed':
-        init_latents_w_f32[watermarking_mask] = gt_patch[watermarking_mask].clone().real
-        return init_latents_w_f32
+        init_latents_w_cpu[watermarking_mask_cpu] = gt_patch_cpu[watermarking_mask_cpu].clone().real
+        return init_latents_w_cpu.to(init_latents_w.device)
 
-    init_latents_w_f32 = torch.fft.ifft2(torch.fft.ifftshift(init_latents_w_fft, dim=(-1, -2))).real
+    init_latents_w_cpu = torch.fft.ifft2(torch.fft.ifftshift(init_latents_w_fft, dim=(-1, -2))).real
 
-    return init_latents_w_f32
+    # 移回原设备
+    return init_latents_w_cpu.to(init_latents_w.device)
 
 
 # ==================== 数据集加载 ====================
