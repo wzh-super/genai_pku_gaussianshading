@@ -9,7 +9,6 @@
 import argparse
 import os
 import json
-import sys
 import torch
 from datasets import load_dataset
 from inverse_stable_diffusion import InversableStableDiffusionPipeline
@@ -17,9 +16,14 @@ from diffusers import DPMSolverMultistepScheduler
 from watermark import Gaussian_Shading, Gaussian_Shading_chacha
 from image_utils import set_random_seed
 
-# 导入TreeRing官方代码
-sys.path.append('./tree-ring-watermark')
-from optim_utils import get_watermarking_mask, get_watermarking_pattern, inject_watermark
+# 导入TreeRing官方代码（避免与当前目录的optim_utils冲突）
+import importlib.util
+spec = importlib.util.spec_from_file_location("tr_optim_utils", "./tree-ring-watermark/optim_utils.py")
+tr_optim_utils = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tr_optim_utils)
+get_watermarking_mask = tr_optim_utils.get_watermarking_mask
+get_watermarking_pattern = tr_optim_utils.get_watermarking_pattern
+inject_watermark = tr_optim_utils.inject_watermark
 
 
 # ==================== 数据集加载 ====================
